@@ -78,45 +78,76 @@ class Client(object):
             param.data = new_param.data.clone()
 
     def test_metrics(self):
+        """
+        Compute test metrics including accuracy and AUC
+        """
         testloaderfull = self.load_test_data()
-        # self.model = self.load_model('model')
-        # self.model.to(self.device)
         self.model.eval()
 
         test_acc = 0
         test_num = 0
-        y_prob = []
-        y_true = []
-        
+        y_prob_list = []
+        y_true_list = []
+
         with torch.no_grad():
-            for x, y in testloaderfull:
+            for batch_idx, (x, y) in enumerate(testloaderfull):
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
                 else:
                     x = x.to(self.device)
                 y = y.to(self.device)
+
                 output = self.model(x)
 
+                # Get predictions
                 test_acc += (torch.sum(torch.argmax(output, dim=1) == y)).item()
                 test_num += y.shape[0]
 
-                y_prob.append(output.detach().cpu().numpy())
-                nc = self.num_classes
-                if self.num_classes == 2:
-                    nc += 1
-                lb = label_binarize(y.detach().cpu().numpy(), classes=np.arange(nc))
-                if self.num_classes == 2:
-                    lb = lb[:, :2]
-                y_true.append(lb)
+                # Get probabilities for AUC calculation
+                probs = torch.nn.functional.softmax(output, dim=1)
 
-        # self.model.cpu()
-        # self.save_model(self.model, 'model')
+                # Convert to numpy immediately and store
+                batch_probs = probs.detach().cpu().numpy()
+                batch_labels = y.detach().cpu().numpy()
 
-        y_prob = np.concatenate(y_prob, axis=0)
-        y_true = np.concatenate(y_true, axis=0)
+                y_prob_list.append(batch_probs)
+                y_true_list.append(batch_labels)
 
-        auc = metrics.roc_auc_score(y_true, y_prob, average='micro')
-        
+                # Debug first batch
+                if batch_idx == 0:
+                    print(f"First batch - probs shape: {batch_probs.shape}, labels shape: {batch_labels.shape}")
+
+        # Concatenate all batches
+        y_prob = np.vstack(y_prob_list)  # Stack vertically to preserve (samples, classes) shape
+        y_true = np.concatenate(y_true_list)
+
+        print(f"Final shapes - y_prob: {y_prob.shape}, y_true: {y_true.shape}")
+        print(f"Test accuracy: {test_acc}/{test_num} = {test_acc / test_num:.4f}")
+
+        # Calculate AUC
+        try:
+            # Check if we have both classes in y_true
+            unique_labels = np.unique(y_true)
+            print(f"Unique labels: {unique_labels}")
+
+            if len(unique_labels) < 2:
+                print(f"Warning: Only one class present in test data: {unique_labels}")
+                auc = 0.0
+            elif self.num_classes == 2:
+                # Binary classification: use probability of positive class
+                auc = metrics.roc_auc_score(y_true, y_prob[:, 1])
+            else:
+                # Multi-class classification
+                from sklearn.preprocessing import label_binarize
+                y_true_bin = label_binarize(y_true, classes=range(self.num_classes))
+                auc = metrics.roc_auc_score(y_true_bin, y_prob, average='micro')
+
+        except Exception as e:
+            print(f"Error calculating AUC: {e}")
+            print(f"y_true shape: {y_true.shape}, unique values: {np.unique(y_true)}")
+            print(f"y_prob shape: {y_prob.shape}, range: [{y_prob.min():.4f}, {y_prob.max():.4f}]")
+            auc = 0.0
+
         return test_acc, test_num, auc
 
     def train_metrics(self):
